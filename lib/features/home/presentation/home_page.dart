@@ -6,7 +6,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'theme/home_palette.dart';
-import 'widgets/home_brand_header.dart';
+import 'widgets/home_app_bar.dart';
 import 'widgets/home_customer_service_chip.dart';
 import 'widgets/home_device_card.dart';
 import 'widgets/home_error_banner.dart';
@@ -60,16 +60,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _initAndScan() async {
-    final granted = await _requestPermissions();
-    if (!granted) {
-      return;
-    }
-
-    final adapterState = await FlutterBluePlus.adapterState.first;
-    if (adapterState != BluetoothAdapterState.on) {
-      if (mounted) {
-        setState(() => _errorMsg = '请先开启手机蓝牙后重试');
-      }
+    final ready = await _ensureReadyForScan();
+    if (!ready) {
       return;
     }
 
@@ -85,16 +77,49 @@ class _HomePageState extends State<HomePage> {
       Permission.locationWhenInUse,
     ].request();
 
-    final granted = statuses.values.every((s) => s.isGranted);
+    // Android 12+/iOS 在不同系统上返回的蓝牙权限项不完全一致，
+    // 不能简单用 every(isGranted) 判断。
+    final bool scanGranted =
+        statuses[Permission.bluetoothScan]?.isGranted ?? false;
+    final bool connectGranted =
+        statuses[Permission.bluetoothConnect]?.isGranted ?? false;
+    final bool legacyBluetoothGranted =
+        statuses[Permission.bluetooth]?.isGranted ?? false;
+    final bool locationGranted =
+        statuses[Permission.locationWhenInUse]?.isGranted ?? false;
+
+    final bool bluetoothGranted =
+        legacyBluetoothGranted || (scanGranted && connectGranted);
+    final bool granted = bluetoothGranted && locationGranted;
+
     if (mounted) {
       setState(() {
         _hasPermission = granted;
         if (!granted) {
           _errorMsg = '需要蓝牙和位置权限才能搜索设备';
+        } else {
+          _errorMsg = null;
         }
       });
     }
     return granted;
+  }
+
+  Future<bool> _ensureReadyForScan() async {
+    final granted = await _requestPermissions();
+    if (!granted) {
+      return false;
+    }
+
+    final adapterState = await FlutterBluePlus.adapterState.first;
+    if (adapterState != BluetoothAdapterState.on) {
+      if (mounted) {
+        setState(() => _errorMsg = '请先开启手机蓝牙后重试');
+      }
+      return false;
+    }
+
+    return true;
   }
 
   Future<void> _startScan() async {
@@ -135,13 +160,20 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _onRefresh() async {
-    if (!_hasPermission) {
-      await _initAndScan();
-    } else {
+    final ready = await _ensureReadyForScan();
+    if (ready) {
       await _startScan();
     }
 
     await Future.delayed(const Duration(milliseconds: 5200));
+  }
+
+  Future<void> _onAddDeviceTap() async {
+    final ready = await _ensureReadyForScan();
+    if (!ready) {
+      return;
+    }
+    await _startScan();
   }
 
   void _onQuickActionTap(String title) {
@@ -190,7 +222,9 @@ class _HomePageState extends State<HomePage> {
                     parent: BouncingScrollPhysics(),
                   ),
                   slivers: [
-                    const SliverToBoxAdapter(child: HomeBrandHeader()),
+                    SliverToBoxAdapter(
+                      child: HomeAppBar(isScanning: _isScanning),
+                    ),
                     SliverToBoxAdapter(
                       child: HomeHeroBanner(
                         pageController: _bannerCtrl,
@@ -224,7 +258,7 @@ class _HomePageState extends State<HomePage> {
                         isScanning: _isScanning,
                         deviceCount: _devices.length,
                         statusText: _scanStatusText(),
-                        onAddTap: _startScan,
+                        onAddTap: _onAddDeviceTap,
                       ),
                     ),
                     if (_errorMsg != null)
