@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:skin_app/core/utils/logger/app_logger.dart';
 
 import 'theme/home_palette.dart';
 import 'widgets/home_app_bar.dart';
@@ -31,7 +33,6 @@ class _HomePageState extends State<HomePage> {
   String? _errorMsg;
   int _bannerIndex = 0;
 
-  Timer? _scanTimer;
   StreamSubscription<List<ScanResult>>? _resultSub;
   StreamSubscription<bool>? _isScanningSub;
 
@@ -51,7 +52,6 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
-    _scanTimer?.cancel();
     _resultSub?.cancel();
     _isScanningSub?.cancel();
     _bannerCtrl.dispose();
@@ -70,26 +70,42 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<bool> _requestPermissions() async {
-    final statuses = await [
-      Permission.bluetooth,
-      Permission.bluetoothScan,
-      Permission.bluetoothConnect,
-      Permission.locationWhenInUse,
-    ].request();
+    // Android 12+ (API 31) 使用 BLUETOOTH_SCAN / BLUETOOTH_CONNECT，
+    // 旧版用 Permission.bluetooth；iOS 统一用 Permission.bluetooth。
+    final List<Permission> permissions = [];
 
-    // Android 12+/iOS 在不同系统上返回的蓝牙权限项不完全一致，
-    // 不能简单用 every(isGranted) 判断。
-    final bool scanGranted =
-        statuses[Permission.bluetoothScan]?.isGranted ?? false;
-    final bool connectGranted =
-        statuses[Permission.bluetoothConnect]?.isGranted ?? false;
-    final bool legacyBluetoothGranted =
-        statuses[Permission.bluetooth]?.isGranted ?? false;
+    if (Platform.isAndroid) {
+      permissions.addAll([
+        Permission.bluetoothScan,
+        Permission.bluetoothConnect,
+        Permission.bluetoothAdvertise,
+        Permission.locationWhenInUse,
+      ]);
+    } else {
+      permissions.addAll([Permission.bluetooth, Permission.locationWhenInUse]);
+    }
+
+    final statuses = await permissions.request();
+
+    bool bluetoothGranted;
+    if (Platform.isAndroid) {
+      final scanGranted =
+          statuses[Permission.bluetoothScan]?.isGranted ?? false;
+      final connectGranted =
+          statuses[Permission.bluetoothConnect]?.isGranted ?? false;
+      bluetoothGranted = scanGranted && connectGranted;
+
+      LogD(
+        'bluetoothScan=$scanGranted, '
+        'bluetoothConnect=$connectGranted, '
+        'location=${statuses[Permission.locationWhenInUse]}',
+      );
+    } else {
+      bluetoothGranted = statuses[Permission.bluetooth]?.isGranted ?? false;
+    }
+
     final bool locationGranted =
         statuses[Permission.locationWhenInUse]?.isGranted ?? false;
-
-    final bool bluetoothGranted =
-        legacyBluetoothGranted || (scanGranted && connectGranted);
     final bool granted = bluetoothGranted && locationGranted;
 
     if (mounted) {
@@ -102,6 +118,11 @@ class _HomePageState extends State<HomePage> {
         }
       });
     }
+
+    LogI(
+      '权限结果: granted=$granted '
+      '(bluetooth=$bluetoothGranted, location=$locationGranted)',
+    );
     return granted;
   }
 
@@ -125,9 +146,10 @@ class _HomePageState extends State<HomePage> {
   Future<void> _startScan() async {
     if (_isScanning) {
       await FlutterBluePlus.stopScan();
+      // 等待底层扫描完全停止，避免竞态
+      await Future.delayed(const Duration(milliseconds: 300));
     }
     await _resultSub?.cancel();
-    _scanTimer?.cancel();
 
     if (mounted) {
       setState(() {
@@ -136,27 +158,33 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
-    _resultSub = FlutterBluePlus.scanResults.listen((results) {
-      if (!mounted) {
-        return;
-      }
+    LogI('开始扫描…');
 
-      setState(() {
-        for (final result in results) {
-          final name = result.device.platformName.trim();
-          if (name.isEmpty) {
-            continue;
+    // flutter_blue_plus ^2.x 使用 scanResults（cumulative，每次回调含全量结果）
+    _resultSub = FlutterBluePlus.scanResults.listen(
+      (results) {
+        if (!mounted) return;
+
+        setState(() {
+          for (final result in results) {
+            final name = _resolvedDeviceName(result);
+            final id = result.device.remoteId.str;
+            LogD('发现设备: name="$name", id=$id, rssi=${result.rssi}');
+            if (_isTargetDevice(result)) {
+              _deviceMap[id] = result;
+            }
           }
-          _deviceMap[result.device.remoteId.str] = result;
-        }
-      });
-    });
+        });
+      },
+      onError: (Object e) {
+        LogE('scanResults error: $e');
+      },
+    );
 
-    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+    // timeout 到期后 flutter_blue_plus 会自动 stopScan
+    await FlutterBluePlus.startScan(timeout: const Duration(seconds: 8));
 
-    _scanTimer = Timer(const Duration(seconds: 5), () async {
-      await FlutterBluePlus.stopScan();
-    });
+    LogI('扫描完成，共发现 ${_deviceMap.length} 台目标设备');
   }
 
   Future<void> _onRefresh() async {
@@ -165,7 +193,7 @@ class _HomePageState extends State<HomePage> {
       await _startScan();
     }
 
-    await Future.delayed(const Duration(milliseconds: 5200));
+    await Future.delayed(const Duration(milliseconds: 8500));
   }
 
   Future<void> _onAddDeviceTap() async {
@@ -190,7 +218,7 @@ class _HomePageState extends State<HomePage> {
       return '请先授权蓝牙和定位权限';
     }
     if (_isScanning) {
-      return '正在搜索设备（5 秒自动停止）';
+      return '正在搜索设备（8 秒自动停止）';
     }
     if (_devices.isEmpty) {
       return '未发现可用设备，可再次点击添加设备';
@@ -200,6 +228,26 @@ class _HomePageState extends State<HomePage> {
 
   List<ScanResult> get _devices =>
       _deviceMap.values.toList()..sort((a, b) => b.rssi.compareTo(a.rssi));
+
+  String _resolvedDeviceName(ScanResult result) {
+    final platformName = result.device.platformName.trim();
+    if (platformName.isNotEmpty) {
+      return platformName;
+    }
+
+    final advName = result.advertisementData.advName.trim();
+    if (advName.isNotEmpty) {
+      return advName;
+    }
+
+    final cachedAdvName = result.device.advName.trim();
+    return cachedAdvName;
+  }
+
+  bool _isTargetDevice(ScanResult result) {
+    final name = _resolvedDeviceName(result).toUpperCase();
+    return name.startsWith('D21');
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -269,7 +317,7 @@ class _HomePageState extends State<HomePage> {
                       SliverToBoxAdapter(
                         child: HomeSectionHeader(
                           title: '可连接设备',
-                          subtitle: '仅显示带设备名称的蓝牙设备',
+                          subtitle: '仅显示蓝牙名以 DC 开头的设备',
                           count: _devices.length,
                         ),
                       ),

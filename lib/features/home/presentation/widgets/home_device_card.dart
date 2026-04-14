@@ -11,8 +11,15 @@ class HomeDeviceCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final name = result.device.platformName.isNotEmpty
-        ? result.device.platformName
+    final platformName = result.device.platformName.trim();
+    final advName = result.advertisementData.advName.trim();
+    final cachedAdvName = result.device.advName.trim();
+    final name = platformName.isNotEmpty
+        ? platformName
+        : advName.isNotEmpty
+        ? advName
+        : cachedAdvName.isNotEmpty
+        ? cachedAdvName
         : '未知设备';
     final mac = result.device.remoteId.str;
     final rssi = result.rssi;

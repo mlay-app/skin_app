@@ -50,7 +50,8 @@ class _DeviceDetailPageState extends State<DeviceDetailPage> {
       final offset = 12 + i * 4;
       final modeCode = data[offset];
       // 将 3 个字节拼接为 6 位 hex 字符串，再用 hexStringToInt 转为十进制
-      final hexStr = data[offset + 1].toRadixString(16).padLeft(2, '0') +
+      final hexStr =
+          data[offset + 1].toRadixString(16).padLeft(2, '0') +
           data[offset + 2].toRadixString(16).padLeft(2, '0') +
           data[offset + 3].toRadixString(16).padLeft(2, '0');
       final count = hexStringToInt(hexStr);
@@ -64,7 +65,7 @@ class _DeviceDetailPageState extends State<DeviceDetailPage> {
     await _ble.connectDevice(
       _device,
       (data) {
-        if (!mounted || data == null) {
+        if (!mounted || data == null || data.isEmpty) {
           return;
         }
 
@@ -74,18 +75,17 @@ class _DeviceDetailPageState extends State<DeviceDetailPage> {
         final modeSlots = _parseModeSlots(data);
 
         setState(() {
-          _logs.insert(
-            0,
-            DeviceLogEntry(
-              hex: hex,
-              dec: dec,
-              time: _nowStr(),
-              modeSlots: modeSlots,
-            ),
-          );
-          if (_logs.length > 200) {
-            _logs.removeLast();
-          }
+          // 仅保留一组最新模式记录：新数据覆盖旧数据
+          _logs
+            ..clear()
+            ..add(
+              DeviceLogEntry(
+                hex: hex,
+                dec: dec,
+                time: _nowStr(),
+                modeSlots: modeSlots,
+              ),
+            );
         });
       },
       (connected) {
@@ -145,7 +145,14 @@ class _DeviceDetailPageState extends State<DeviceDetailPage> {
               const SizedBox(height: 16),
               DeviceLogHeader(
                 logCount: _logs.length,
+                isConnected: _isConnected,
                 onClear: () => setState(() => _logs.clear()),
+                onRead: _isConnected
+                    ? () async {
+                        // 主动触发一次 BLE read，结果通过 lastValueStream 回调到 _logs
+                        await _ble.readNotifyCharacteristic();
+                      }
+                    : null,
               ),
               const SizedBox(height: 8),
               Expanded(

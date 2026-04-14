@@ -7,10 +7,16 @@ class DeviceLogHeader extends StatelessWidget {
     super.key,
     required this.logCount,
     required this.onClear,
+    this.onRead,
+    this.isConnected = false,
   });
 
   final int logCount;
   final VoidCallback onClear;
+
+  /// 主动读取设备当前值的回调（仅连接状态下显示）
+  final VoidCallback? onRead;
+  final bool isConnected;
 
   @override
   Widget build(BuildContext context) {
@@ -44,6 +50,17 @@ class DeviceLogHeader extends StatelessWidget {
               ),
             ),
           const Spacer(),
+          // 已连接时显示「读取」按钮，主动拉取设备当前特征值
+          if (isConnected && onRead != null) ...[
+            GestureDetector(
+              onTap: onRead,
+              child: const Text(
+                '读取',
+                style: TextStyle(color: DevicePalette.gold, fontSize: 13),
+              ),
+            ),
+            if (logCount > 0) const SizedBox(width: 16),
+          ],
           if (logCount > 0)
             GestureDetector(
               onTap: onClear,

@@ -1,0 +1,26 @@
+---
+description: 
+alwaysApply: true
+---
+
+## Architecture
+- Use feature-first folder structure
+- State management: Riverpod
+- Common widgets go in lib/widgets/
+- Theme files go in lib/theme/
+
+## UI Rules
+- Prefer Material 3
+- Reuse theme colors and text styles first
+- Break complex sections into reusable widgets
+- Use const constructors where possible
+
+## Assets
+- Images: assets/images/
+- SVG: assets/svg/
+- Update pubspec.yaml when adding assets
+
+## Figma Rules
+- When using Figma MCP, prioritize semantic widget mapping
+- Extract theme tokens before building full screens
+- Prefer reusable components over one large page file

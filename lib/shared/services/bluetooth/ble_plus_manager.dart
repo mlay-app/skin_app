@@ -16,6 +16,7 @@ class BleManager {
 
   BluetoothDevice? selectDevice;
   BluetoothCharacteristic? mCharacteristic;
+  BluetoothCharacteristic? _notifyCharacteristic; // 单独保存通知特征，用于主动读取
   StreamSubscription<List<int>>? notifyStream;
   StreamSubscription<BluetoothConnectionState>? bleDeviceStream;
   StreamSubscription<List<ScanResult>>? scanResultStream;
@@ -103,6 +104,7 @@ class BleManager {
     } finally {
       _isDisconnecting = false; // 重置标志位
       mCharacteristic = null;
+      _notifyCharacteristic = null;
       selectDevice = null;
       _bleConnectTime = null;
       _currentMtu = 23;
@@ -188,8 +190,12 @@ class BleManager {
           return;
         }
 
+        // 优先使用主服务（FFE0），找到后不再继续遍历备用服务
+        bool primaryServiceFound = false;
+
         for (BluetoothService service in services) {
           if (_uuidMatches(service.uuid, _serviceUuidPrimary)) {
+            primaryServiceFound = true;
             List<BluetoothCharacteristic> characteristics =
                 service.characteristics;
             for (BluetoothCharacteristic characteristic in characteristics) {
@@ -207,6 +213,7 @@ class BleManager {
                   mCharacteristic = characteristic;
                 }
                 if (characteristic.properties.notify) {
+                  _notifyCharacteristic = characteristic;
                   await setCharacteristicNotify(
                     characteristic,
                     true,
@@ -215,36 +222,67 @@ class BleManager {
                 }
               }
             }
-          } else if (_uuidMatches(service.uuid, _serviceUuidSecondary)) {
-            List<BluetoothCharacteristic> characteristics =
-                service.characteristics;
-            for (var characteristic in characteristics) {
-              LogD("msg=${characteristic.uuid.toString()}");
-              if (_uuidMatches(characteristic.uuid, _writeCharUuidSecondary)) {
-                // 备用写特征：...FF00
-                mCharacteristic = characteristic;
-                if (onCharacteristicSet != null) {
-                  onCharacteristicSet();
-                }
-                // values
-              } else if (_uuidMatches(
-                characteristic.uuid,
-                _notifyCharUuidSecondary,
-              )) {
-                // 备用通知特征：...FF02
-                if (characteristic.properties.notify) {
-                  await setCharacteristicNotify(
-                    characteristic,
-                    true,
-                    characteristicHandler,
-                  );
+            LogD('主服务 FFE0 已配置完成，跳过备用服务');
+            break; // 主服务配置完成，不再处理备用服务
+          }
+        }
+
+        // 主服务不存在时，回退到备用服务
+        if (!primaryServiceFound) {
+          LogD('未找到主服务 FFE0，尝试备用服务');
+          for (BluetoothService service in services) {
+            if (_uuidMatches(service.uuid, _serviceUuidSecondary)) {
+              List<BluetoothCharacteristic> characteristics =
+                  service.characteristics;
+              for (var characteristic in characteristics) {
+                LogD("msg=${characteristic.uuid.toString()}");
+                if (_uuidMatches(
+                  characteristic.uuid,
+                  _writeCharUuidSecondary,
+                )) {
+                  // 备用写特征：...FF00
+                  mCharacteristic = characteristic;
+                  if (onCharacteristicSet != null) {
+                    onCharacteristicSet();
+                  }
+                } else if (_uuidMatches(
+                  characteristic.uuid,
+                  _notifyCharUuidSecondary,
+                )) {
+                  // 备用通知特征：...FF02
+                  if (characteristic.properties.notify) {
+                    _notifyCharacteristic = characteristic;
+                    await setCharacteristicNotify(
+                      characteristic,
+                      true,
+                      characteristicHandler,
+                    );
+                  }
                 }
               }
+              break;
             }
           }
         }
       }
     });
+  }
+
+  /// 主动读取通知特征的当前值（支持 read 属性时使用）
+  Future<void> readNotifyCharacteristic() async {
+    if (_isDisconnecting) return;
+    final c = _notifyCharacteristic;
+    if (c == null) return;
+    if (!c.properties.read) {
+      LogD('通知特征不支持 read，跳过主动读取');
+      return;
+    }
+    try {
+      final value = await c.read();
+      LogD('主动读取通知特征值: $value');
+    } catch (e) {
+      LogD('主动读取特征值失败: $e');
+    }
   }
 
   Future<void> setCharacteristicNotify(
@@ -260,20 +298,24 @@ class BleManager {
 
     await cancelNotify();
     await c.setNotifyValue(notify);
+
+    // 使用 onValueReceived 确保每一次设备推送都能触发，不会因值相同而被去重
     notifyStream = c.onValueReceived.listen((value) {
       if (value.isEmpty) {
-        LogD("我是蓝牙返回数据 - 空！！");
+        LogD('蓝牙返回数据为空，跳过');
         return;
       }
-      LogD('setCharacteristicNotify==$value');
-      // List data = [];
-      // for (var i = 0; i < value.length; i++) {
-      //   String dataStr = value[i].toRadixString(16);
-      //   if (dataStr.length < 2) {
-      //     dataStr = "0" + dataStr;
-      //   }
-      //   data.add(dataStr);
-      // }
+
+      // 过滤设备订阅握手响应，不作为业务数据处理
+      final asString = String.fromCharCodes(value);
+      if (asString == 'ntf_enable') {
+        LogD('收到设备通知使能确认');
+        return;
+      }
+
+      final hex = value.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+      LogD('特征值收到: [$hex]  (${value.length} bytes)');
+
       if (_bleConnectTime != null) {
         LogD(
           'msg=连接时间=${DateTime.now().difference(_bleConnectTime!).inSeconds}秒',
